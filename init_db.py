@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ملف إنشاء وتجهيز قاعدة البيانات (100 دكتور من 1 إلى 100 - المباني A, B, C, D - الأيام المرنة)
-مشروع: دليل الساعات المكتبية ومواقع الدكاترة الذكي
+ملف إنشاء وتجهيز قاعدة البيانات المحدث (النسخة الذكية مع حسابات الطلبة والمراسلة الفورية)
+مشروع: دليل الساعات المكتبية ومواقع الدكاترة الذكي — جامعة جدارا
 إعداد المطور الرئيسي: ثابت قيس محمد قواسمة (202220020)
 """
 
@@ -116,7 +116,7 @@ def create_and_seed_database(db_path=DB_FILENAME):
     cur = conn.cursor()
     cur.execute("PRAGMA journal_mode = MEMORY;")
     cur.execute("PRAGMA foreign_keys = OFF;")
-    for t in ["Users", "OfficeHours", "FacultyMembers", "Buildings", "Departments"]:
+    for t in ["Messages", "Users", "OfficeHours", "FacultyMembers", "Buildings", "Departments"]:
         cur.execute(f"DROP TABLE IF EXISTS {t};")
     cur.execute("PRAGMA foreign_keys = ON;")
 
@@ -144,6 +144,7 @@ def create_and_seed_database(db_path=DB_FILENAME):
         office_number TEXT NOT NULL,
         email TEXT NOT NULL UNIQUE,
         is_deleted INTEGER DEFAULT 0,
+        live_status TEXT DEFAULT 'Available',
         FOREIGN KEY (department_id) REFERENCES Departments(department_id),
         FOREIGN KEY (building_id) REFERENCES Buildings(building_id)
     );""")
@@ -166,7 +167,28 @@ def create_and_seed_database(db_path=DB_FILENAME):
         password_hash TEXT NOT NULL,
         role TEXT NOT NULL,
         doctor_id INTEGER,
+        full_name TEXT DEFAULT '',
+        student_number TEXT DEFAULT '',
+        department_name TEXT DEFAULT '',
         FOREIGN KEY (doctor_id) REFERENCES FacultyMembers(doctor_id) ON DELETE SET NULL
+    );""")
+
+    cur.execute("""
+    CREATE TABLE Messages (
+        message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_user_id INTEGER NOT NULL,
+        student_name TEXT NOT NULL,
+        student_number TEXT NOT NULL,
+        doctor_id INTEGER NOT NULL,
+        template_type TEXT NOT NULL,
+        student_note TEXT DEFAULT '',
+        doctor_status TEXT DEFAULT 'Pending',
+        suggested_time TEXT DEFAULT '',
+        doctor_reply TEXT DEFAULT '',
+        created_at TEXT NOT NULL,
+        replied_at TEXT DEFAULT '',
+        FOREIGN KEY (student_user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+        FOREIGN KEY (doctor_id) REFERENCES FacultyMembers(doctor_id) ON DELETE CASCADE
     );""")
 
     departments = [
@@ -188,12 +210,14 @@ def create_and_seed_database(db_path=DB_FILENAME):
     for c, n in buildings:
         cur.execute("INSERT INTO Buildings (building_code, building_name) VALUES (?, ?);", (c, n))
 
+    statuses_cycle = ["Available", "Available", "InLecture", "Available", "InMeeting"]
     for line in RAW_DOCTORS.strip().splitlines():
         doc_id, name, rank, d_id, b_id, fl, off, em, days_csv, times_p = line.split("|")
         doc_id, d_id, b_id = int(doc_id), int(d_id), int(b_id)
+        l_stat = statuses_cycle[(doc_id - 1) % len(statuses_cycle)]
         cur.execute(
-            "INSERT INTO FacultyMembers VALUES (?,?,?,?,?,?,?,?,0);",
-            (doc_id, name, rank, d_id, b_id, fl, off, em),
+            "INSERT INTO FacultyMembers VALUES (?,?,?,?,?,?,?,?,0,?);",
+            (doc_id, name, rank, d_id, b_id, fl, off, em, l_stat),
         )
         st, et = [x.strip() for x in times_p.split("-")]
         raw_s = f"{days_csv} ({st} - {et})"
@@ -203,14 +227,67 @@ def create_and_seed_database(db_path=DB_FILENAME):
         )
         uname = em.split("@")[0]
         cur.execute(
-            "INSERT OR IGNORE INTO Users (username, password_hash, role, doctor_id) VALUES (?, 'doctor123', 'Faculty', ?);",
-            (uname, doc_id),
+            "INSERT OR IGNORE INTO Users (username, password_hash, role, doctor_id, full_name) VALUES (?, 'doctor123', 'Faculty', ?, ?);",
+            (uname, doc_id, name),
         )
 
-    cur.execute("INSERT INTO Users (username, password_hash, role, doctor_id) VALUES ('admin', 'admin123', 'Admin', NULL);")
+    # حساب المدير العام
+    cur.execute(
+        "INSERT INTO Users (username, password_hash, role, doctor_id, full_name) VALUES ('admin', 'admin123', 'Admin', NULL, 'مدير النظام');"
+    )
+
+    # حسابات الطلبة الافتراضية
+    students_seed = [
+        ("thabet", "student123", "Student", "ثابت قيس محمد قواسمة", "202220020", "هندسة البرمجيات"),
+        ("aws", "student123", "Student", "أوس ماهر عللوه", "202210304", "هندسة البرمجيات"),
+        ("yazeed", "student123", "Student", "يزيد معاوية سفيان شلول", "202211043", "هندسة البرمجيات"),
+    ]
+    for un, pw, rl, fn, sn, dp in students_seed:
+        cur.execute(
+            "INSERT INTO Users (username, password_hash, role, doctor_id, full_name, student_number, department_name) VALUES (?,?,?,NULL,?,?,?);",
+            (un, pw, rl, fn, sn, dp),
+        )
+
+    thabet_uid = cur.execute("SELECT user_id FROM Users WHERE username='thabet'").fetchone()[0]
+    aws_uid = cur.execute("SELECT user_id FROM Users WHERE username='aws'").fetchone()[0]
+
+    sample_msgs = [
+        (
+            thabet_uid, "ثابت قيس محمد قواسمة", "202220020", 70,
+            "مراجعة مشروع التخرج / تسليم تكليف",
+            "دكتور معن، نود عرض التحديثات الجديدة للمشروع ومناقشة التقرير النهائي.",
+            "Available", "13:30",
+            "أهلاً بك يا ثابت، أنا متاح في المكتب D-107 الساعة 13:30، تفضلوا بالحضور.",
+            "2026-11-10 09:30", "2026-11-10 09:45"
+        ),
+        (
+            thabet_uid, "ثابت قيس محمد قواسمة", "202220020", 1,
+            "طلب موعد إرشاد أكاديمي / استفسار عن مادة",
+            "دكتور أحمد، هل يمكنني المرور على مكتبك B-204 اليوم للاستفسار عن هندسة البرمجيات؟",
+            "Postponed", "11:30",
+            "لدي اجتماع قسم قصير في بداية الساعة، سأكون متفرغاً لك الساعة 11:30 صباحاً.",
+            "2026-11-10 10:00", "2026-11-10 10:10"
+        ),
+        (
+            aws_uid, "أوس ماهر عللوه", "202210304", 1,
+            "طلب تحديد موعد بديل للساعات المكتبية",
+            "دكتور أحمد، لدي محاضرة وقت الساعات المكتبية، متى يناسبك أن أمر عليك؟",
+            "Pending", "", "",
+            "2026-11-10 10:25", ""
+        ),
+    ]
+    for m in sample_msgs:
+        cur.execute("""
+            INSERT INTO Messages (
+                student_user_id, student_name, student_number, doctor_id,
+                template_type, student_note, doctor_status, suggested_time,
+                doctor_reply, created_at, replied_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?);
+        """, m)
+
     conn.commit()
     conn.close()
-    print("✅ تم بناء قاعدة البيانات (الدكاترة 1 إلى 100 | المباني A, B, C, D | الأيام الفردية) بنجاح!")
+    print("✅ تم بناء قاعدة البيانات الذكية بنجاح!")
 
 
 if __name__ == "__main__":
